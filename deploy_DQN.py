@@ -17,8 +17,8 @@ model = DQN2(elements=[1,29],r_cut = 8.5,
              N_emb=24, N_fit = 128, atom_max = 260);
 target = DQN2(elements=[1,29],r_cut = 8.5, 
              N_emb=24, N_fit = 128, atom_max = 260);
-model.load('model100.pt');
-target.load('model100.pt');
+model.load('model_DQN.pt');
+target.load('model_DQN.pt');
 trainer = Q_trainer(model, target, lr=10**-4, temperature = 100);
 
 El = [];
