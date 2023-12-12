@@ -26,12 +26,12 @@ Tl = [];
 Cl = [];
 for u in range(50,100):
     conf = configuration();
-    conf.load('Fig3/'+sro+'/POSCAR_'+str(u));
+    conf.load('POSCARs/'+sro+'/POSCAR_'+str(u));
     conf.set_potential();
     env = environment(conf, max_iter=100);
     env.relax(accuracy = 0.1);
     
-    filename = 'Fig3/'+sro+'/XDATCAR'+str(u);
+    filename = 'POSCARs/'+sro+'/XDATCAR'+str(u);
     io.write(filename, conf.atoms, format='vasp-xdatcar');
     tlist = [0];
     clist = [conf.atoms.get_positions()[-1].tolist()];
@@ -49,6 +49,6 @@ for u in range(50,100):
             print(str(u)+': '+str(tstep));
     Tl.append(tlist);
     Cl.append(clist);
-    with open('Fig3/'+sro+'/diffuse.json','w') as file:
+    with open('POSCARs/'+sro+'/diffuse.json','w') as file:
         json.dump([Tl,Cl], file);
     
