@@ -100,6 +100,24 @@ class configuration(object):
     def potential(self):   # compute total potential energy. unit: eV
         return self.atoms.get_potential_energy();
     
+    def freq(self, delta = 0.05):
+        Hlist = np.argwhere(self.atoms.get_atomic_numbers()==1).T[0];
+        pos = self.pos(f='c');
+        f0 = self.force();
+        log_niu_prod = 0;
+        for i in Hlist:
+            Hessian = np.zeros([3,3]);
+            for j in range(3):
+                pos1 = pos.copy();
+                pos1[i][j] += delta;
+                self.atoms.set_positions(pos1);
+                Hessian[j] = -(self.force()-f0)[i]/delta;
+            prod = np.prod(np.linalg.eigvalsh((Hessian+Hessian.T)/2));
+            log_niu_prod += np.log(prod)/2; # + 3*np.log(1.55716*10);
+            
+        self.atoms.set_positions(pos);
+        return log_niu_prod;
+    
     def plot_configuration(self):  # plot the atomic configuration
         if(self.platform =='matlantis'):
             import nglview as nv;
@@ -114,3 +132,4 @@ class configuration(object):
             c = self.atoms;
             v = view(c);
         return v;
+    

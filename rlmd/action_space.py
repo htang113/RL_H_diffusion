@@ -4,7 +4,7 @@ import ase;
 from heapq import nsmallest;
 from scipy.spatial import ConvexHull;
 
-def actions(config, dist_mul_body = 1.5, dist_mul_surf = 1.2, collision_step = 5, collision_r = 0.5, act_mul = 1.5,act_mul_move = 1.2):
+def actions(config, dist_mul_body = 1.2, dist_mul_surf = 1.2, collision_step = 5, collision_r = 0.6, act_mul = 1.5,act_mul_move = 1.2):
     ## TODO: please write a function to output a discrete set of actions
     ## actions is supposed to be a N*4 array, where N is the number of actions.
     ## The 1+3D array of each action: (i_atom, dx, dy, dz)
@@ -18,6 +18,20 @@ def actions(config, dist_mul_body = 1.5, dist_mul_surf = 1.2, collision_step = 5
     n_atom = len(pos);
     actions = [];
     
+    def test_collision(atoms, displace_index, displace_vector, otherH):
+        
+        atom_displaced = atoms.copy();
+        pos_displaced = atom_displaced.get_positions();
+        pos_displaced[displace_index] += displace_vector;
+        atom_displaced.set_positions(pos_displaced);
+        pos1 = atom_displaced.get_distances(range(n_atom),i,mic=True);
+        secondaryAtom_ind = np.nonzero(pos1 < collision_r)[0];
+        secondaryAtom_ind = secondaryAtom_ind[np.nonzero(secondaryAtom_ind-i)];
+        secondaryAtom_ind = secondaryAtom_ind[np.nonzero(1-np.isin(secondaryAtom_ind,NN_ind))];
+        secondaryAtom_hasH = secondaryAtom_ind[np.nonzero(np.isin(secondaryAtom_ind,otherH)+np.isin(secondaryAtom_ind,NN_ind))];
+        
+        return secondaryAtom_ind, secondaryAtom_hasH
+        
     for ind in Hlist:
         i = ind[0];
         otherHlist = Hlist.reshape(Hlist.shape[0])[np.nonzero(Hlist.reshape(Hlist.shape[0]) != i)];
@@ -33,18 +47,12 @@ def actions(config, dist_mul_body = 1.5, dist_mul_surf = 1.2, collision_step = 5
         if surfaceOrnot.size == 0:    #not on surface
             for simplex in hull.simplices:
                 vec = np.mean(NN[simplex],axis=0)*1;
-                flag0 = 1;                
+                act_mul1 = max(act_mul, 1.4/np.linalg.norm(vec));
+                flag0 = 1;
                 for move in range(collision_step+1):
-                    atom_displaced = config.atoms.copy();
-                    pos_displaced = atom_displaced.get_positions();
-                    pos_displaced[i] += (1+(act_mul-1)*move/(collision_step))*vec;
-                    atom_displaced.set_positions(pos_displaced);
-                    pos1 = atom_displaced.get_distances(range(n_atom),i,mic=True);
+                    vec1 = (1+(act_mul1-1)*move/(collision_step))*vec;
+                    secondaryAtom_ind, secondaryAtom_hasH = test_collision(config.atoms, i, vec1, otherHlist);
                     
-                    secondaryAtom_ind = np.nonzero(pos1 < collision_r)[0];
-                    secondaryAtom_ind = secondaryAtom_ind[np.nonzero(1-np.isin(secondaryAtom_ind,NN_ind))];
-                    secondaryAtom_ind = secondaryAtom_ind[np.nonzero(secondaryAtom_ind-i)];
-                    secondaryAtom_hasH = secondaryAtom_ind[np.nonzero(np.isin(secondaryAtom_ind,otherHlist))];
                     if secondaryAtom_hasH.size != 0:
                         flag0 = 0;
                         break;
@@ -59,14 +67,14 @@ def actions(config, dist_mul_body = 1.5, dist_mul_surf = 1.2, collision_step = 5
                             simpl = np.sort(hull_local.simplices,axis = 1);
                             for simplex_local in simpl:
                                 if np.linalg.norm(simplex_local-np.array([0,1,2]))!=0:
-                                    vec_act = np.mean(NN_new[simplex_local],axis=0)*1;
-                                    all_dist = np.linalg.norm(pos - (c + act_mul*vec_act), axis =1);
-                                    if(np.min(np.delete(all_dist,i))>collision_r):
-                                        act = act_mul*vec_act;
+                                    vec_act = np.mean(NN_new[simplex_local],axis=0);
+                                    collision,_ = test_collision(config.atoms, i, act_mul1*vec_act, otherHlist);
+                                    if(collision.size == 0):
+                                        act = act_mul1*vec_act;
                                         actions.append([i]+act.tolist());
                             break;
                 if flag0:
-                    act = act_mul*vec;
+                    act = act_mul1*vec;
                     actions.append([i]+act.tolist()); 
                     
                     
@@ -83,7 +91,7 @@ def actions(config, dist_mul_body = 1.5, dist_mul_surf = 1.2, collision_step = 5
             action_temp = [];
             #Find all the surface atoms and Deal with hopping into deep surface
             for spc in range(simp_surface.shape[0]):
-                if np.isin(spc,FromHOrnot):
+                if np.isin(spc,FromHOrnot): #surface migration
                     surface_ind = np.append(surface_ind, simp_surface[spc],axis = 0);   
                     pp = np.nonzero(np.sum((simp_surface == simp_surface[spc][1])+(simp_surface == simp_surface[spc][2]),axis = 1)==2)[0];
                     surf_tri_simp = simp_surface[pp[np.nonzero(pp != spc)]][0];
@@ -94,24 +102,20 @@ def actions(config, dist_mul_body = 1.5, dist_mul_surf = 1.2, collision_step = 5
                     coef_arr = np.linalg.solve(A,B);
                     
                     vec = -(coef_arr[0]*a+coef_arr[1]*b+(1-coef_arr[0]-coef_arr[1])*cc)+(NN_surface[simp_surface[spc][1]]+NN_surface[simp_surface[spc][2]])/2;
-                    if(np.min(np.linalg.norm(pos - (c + act_mul*vec), axis =1))>collision_r):
-                        act = act_mul*vec;
-                        actions.append([i]+act.tolist());   
-                else:
+                    
+                    act = max(1.4/np.linalg.norm(vec), act_mul)*vec;
+                    collision,_ = test_collision(config.atoms, i, act, otherHlist);
+                    if(collision.size == 0):
+                        actions.append([i]+act.tolist());
+                        
+                else:   #entering the bulk
                     simplex = simp_surface[spc];
                     vec = np.mean(NN_surface[simplex],axis=0)*1;
                     flag1 = 1;
                     for move in range(collision_step):
-                        atom_displaced = config.atoms.copy();
-                        pos_displaced = atom_displaced.get_positions();
-                        pos_displaced[i] += (1+(act_mul-1)*move/(collision_step))*vec;
-                        atom_displaced.set_positions(pos_displaced);
-                        pos1 = atom_displaced.get_distances(range(n_atom),i,mic=True);
+                        vec1 = (1+(act_mul-1)*move/(collision_step))*vec;
+                        secondaryAtom_ind, secondaryAtom_hasH = test_collision(config.atoms, i, vec1, otherHlist);
 
-                        secondaryAtom_ind = np.nonzero(pos1 < collision_r)[0];
-                        secondaryAtom_ind = secondaryAtom_ind[np.nonzero(1-np.isin(secondaryAtom_ind,NN_ind))];
-                        secondaryAtom_ind = secondaryAtom_ind[np.nonzero(secondaryAtom_ind-i)];
-                        secondaryAtom_hasH = secondaryAtom_ind[np.nonzero(np.isin(secondaryAtom_ind,otherHlist))];
                         if secondaryAtom_hasH.size != 0:
                             flag1 = 0;
                             break;
@@ -126,9 +130,9 @@ def actions(config, dist_mul_body = 1.5, dist_mul_surf = 1.2, collision_step = 5
                                 simpl = np.sort(hull_local.simplices,axis = 1);
                                 for simplex_local in simpl:
                                     if np.linalg.norm(simplex_local-np.array([0,1,2]))!=0:
-                                        vec_act = np.mean(NN_new[simplex_local],axis=0)*1;
-                                        all_dist = np.linalg.norm(pos - (c + act_mul*vec_act), axis =1);
-                                        if(np.min(np.delete(all_dist,i))>collision_r):
+                                        vec_act = np.mean(NN_new[simplex_local],axis=0);
+                                        collision,_ = test_collision(config.atoms, i, act_mul*vec_act, otherHlist);
+                                        if(collision.size == 0):
                                             act = act_mul*vec_act;
                                             action_temp.append([i]+act.tolist());
                                 break;
@@ -147,16 +151,9 @@ def actions(config, dist_mul_body = 1.5, dist_mul_surf = 1.2, collision_step = 5
                 
                 flag2 = 1;
                 for move in range(collision_step+1):
-                    atom_displaced = config.atoms.copy();
-                    pos_displaced = atom_displaced.get_positions();
-                    pos_displaced[i] += (1+(act_mul_surf-1)*move/(collision_step))*vec;
-                    atom_displaced.set_positions(pos_displaced);
-                    pos1 = atom_displaced.get_distances(range(n_atom),i,mic=True);
-
-                    secondaryAtom_ind = np.nonzero(pos1 < collision_r)[0];
-                    secondaryAtom_ind = secondaryAtom_ind[np.nonzero(1-np.isin(secondaryAtom_ind,NN_ind))];
-                    secondaryAtom_ind = secondaryAtom_ind[np.nonzero(secondaryAtom_ind-i)];
-                    secondaryAtom_hasH = secondaryAtom_ind[np.nonzero(np.isin(secondaryAtom_ind,otherHlist))];
+                    vec1 = (1+(act_mul_surf-1)*move/(collision_step))*vec;
+                    secondaryAtom_ind, secondaryAtom_hasH = test_collision(config.atoms, i, vec1, otherHlist);
+                    
                     if secondaryAtom_hasH.size != 0:
                         flag2 = 0;
                         break;
@@ -177,8 +174,8 @@ def actions(config, dist_mul_body = 1.5, dist_mul_surf = 1.2, collision_step = 5
                                     vec_add = np.cross(NN_new[simplex_local][1]-NN_new[simplex_local][0],NN_new[simplex_local][2]-NN_new[simplex_local][0]);
                                     vec_add = vec_add*np.dot(vec_add,vec_act)/np.linalg.norm(vec_add)**2*(act_mul_move-1);
                                     vec_sum = vec_act + vec_add;
-                                    all_dist = np.linalg.norm(pos - (c + vec_sum), axis =1);
-                                    if(np.min(np.delete(all_dist,i))>collision_r):
+                                    collision,_ = test_collision(config.atoms, i, vec_sum, otherHlist);
+                                    if(collision.size == 0):
                                         act = vec_sum;
                                         actions.append([i]+act.tolist());
                             break;

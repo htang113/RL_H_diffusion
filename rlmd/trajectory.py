@@ -27,11 +27,14 @@ class trajectory(object):
         self.act_space    = [];
         self.action_probs = [];
         self.rewards      = [];
+        self.freq         = [];
         
         self.E_min      = [];
         self.E_s        = [];
         self.E_next     = [];
         self.fail       = [];
+        self.R          = [];
+        self.S          = [];
         
         self.fail_panelty = -0.5;
         self.kb = 1.380649/1.602*10**-4;
@@ -44,6 +47,7 @@ class trajectory(object):
         self.action_probs.append(info['act_probs']);
         self.fail.append(info['fail']);
         self.next_states.append(info['next']);
+        self.freq.append(info['log_freq'])
         
         self.E_min.append(info['E_min']);
         self.E_next.append(info['E_next']);
@@ -86,7 +90,8 @@ class trajectory(object):
         self.E_min,
         self.E_s,
         self.E_next,
-        self.fail];
+        self.fail,
+        self.freq];
         
         import json;
         with open(filename+'.json','w') as file:
@@ -109,11 +114,11 @@ class trajectory(object):
         self.E_min,
         self.E_s,
         self.E_next,
-        self.fail] = data;
+        self.fail,
+        self.freq] = data;
         self.trajectory = [];
         for i in range(len(self.actions)):
             self.states.append(ase.Atoms.fromdict(states[i]));
             self.next_states.append(ase.Atoms.fromdict(next_states[i]));
 
-        
-        
+     
