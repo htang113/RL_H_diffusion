@@ -19,7 +19,7 @@ kT =  T*8.617*10**-5;
 horizon = 500;
 model = Q_NN(elements=[1,24,27,28],r_cut = 5, 
              N_emb=24, N_fit = 128, atom_max = 50);
-model.load('model_test.pt');
+model.load('model_context_bandit.pt');
 trainer = Context_Bandit(model, temperature = T);
 
 Tl = [];
