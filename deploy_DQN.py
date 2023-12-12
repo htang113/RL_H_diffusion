@@ -24,12 +24,12 @@ trainer = Q_trainer(model, target, lr=10**-4, temperature = 100);
 El = [];
 for u in range(50):
     conf = configuration();
-    conf.load('Fig4/pos/POSCAR'+str(u));
+    conf.load('POSCARs/pos/POSCAR'+str(u));
     conf.set_potential();
     env = environment(conf, max_iter=100);
     env.relax(accuracy = 0.1);
     
-    filename = 'Fig4/traj/XDATCAR'+str(u);
+    filename = 'POSCARs/pos/XDATCAR'+str(u);
     io.write(filename, conf.atoms, format='vasp-xdatcar');
     Elist = [conf.potential()];
     for tstep in range(horizon):
@@ -44,6 +44,6 @@ for u in range(50):
         if(tstep%100==0):
             print(str(u)+': '+str(tstep));
     El.append(Elist);
-    with open('Fig4/converge.json','w') as file:
+    with open('POSCARs/pos/converge.json','w') as file:
         json.dump(El, file);
     
