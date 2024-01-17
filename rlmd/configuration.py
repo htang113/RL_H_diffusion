@@ -22,7 +22,7 @@ class configuration(object):
     def load(self,filename):
         self.atoms = ase.io.read(filename, format='vasp');
             
-    def set_potential(self, platform: str = 'matlantis', potential_id: str = 'EAM_Dynamo_MendelevKing_2013_Cu__MO_748636486270_005'):
+    def set_potential(self, platform: str = 'matlantis', potential_id: str = '2018--Choi-W-M-Jo-Y-H-Sohn-S-S-et-al--Co-Ni-Cr-Fe-Mn'):
         self.platform = platform;
         if(platform == 'matlantis'):
             from pfp_api_client.pfp.estimator import Estimator
@@ -37,6 +37,9 @@ class configuration(object):
         elif(platform =='ase'):
             from ase.calculators.eam import EAM;
             self.calculator = EAM(potential=potential_id);
+        elif(platform == 'mace'):
+            from mace.calculators import mace_mp
+            self.calculator = mace_mp(model="medium", dispersion=False, default_dtype="float32", device='cuda')
         else:
             raise('Error: platform should be set as either matlantis or kimpy');
         self.atoms.calc = self.calculator;

@@ -65,7 +65,7 @@ class environment(object):
         self.config.atoms.set_scaled_positions(pos_frac);
         return 0;
     
-    def saddle(self, moved_atom=-1, accuracy = 0.1, n_points=10):
+    def saddle(self, moved_atom=-1, accuracy = 0.1, n_points=10, platform="matlantis"):
         
         self.config.atoms.set_constraint(ase.constraints.FixAtoms(mask = [False]*self.n_atom));
         self.initial.set_constraint(ase.constraints.FixAtoms(mask = [False]*self.n_atom));
@@ -78,7 +78,7 @@ class environment(object):
         
         temp = configuration([1]*6,[(0,0,0)],'H');
         for image in range(n_points):
-            temp.set_potential();
+            temp.set_potential(platform=platform);
             images[image].calc = temp.calculator;
             images[image].set_constraint(ase.constraints.FixAtoms(mask=self.mask()));
         with redirect_stdout(self.output):  
