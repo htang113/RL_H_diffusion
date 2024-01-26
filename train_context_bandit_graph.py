@@ -99,3 +99,4 @@ for epoch in range(n_traj):
 
     if epoch % 10 == 0:
         reaction_model.save(task + "/model/model" + str(epoch))
+reaction_model.save(task + "/model/model_trained")
