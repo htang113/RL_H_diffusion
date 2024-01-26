@@ -15,16 +15,31 @@ from ase import Atoms
 from rgnn.graph.dataset.reaction import ReactionDataset
 from rgnn.graph.reaction import ReactionGraph
 from rgnn.graph.utils import batch_to
-from rgnn.models.reaction import ReactionGNN
-from rgnn.models.reaction_models import PaiNN
+from rgnn.models.reaction import ReactionDQN
 from torch_geometric.loader import DataLoader
 from rgnn.train.loss import WeightedSumLoss
-from rgnn.models.reaction_models.utils import get_scaler
 
 
 class ContextBandit:
-    def __init__(self, model: ReactionGNN, lr=10**-3, eps_clip=0.01, temperature=300):
+    def __init__(
+        self,
+        model: ReactionDQN,
+        lr=10**-3,
+        eps_clip=0.01,
+        temperature=300,
+        train_all=False,
+    ):
         self.policy_value_net = model
+        if not train_all:
+            for name, param in self.policy_value_net.named_parameters():
+                if "reaction_model" in name:
+                    param.requires_grad = False
+
+        trainable_params = filter(
+            lambda p: p.requires_grad, self.policy_value_net.parameters()
+        )
+        # self.reward_normalizer = DynamicNormalizer()
+        self.optimizer = optim.Adam(trainable_params, lr=lr)
         self.optimizer = optim.Adam(self.policy_value_net.parameters(), lr=lr)
         self.eps_clip = eps_clip
         self.kT = temperature * 8.617 * 10**-5
@@ -38,7 +53,7 @@ class ContextBandit:
             for batch in dataloader:
                 batch = batch_to(batch, device)
                 rl_q = self.policy_value_net.get_q(
-                    batch, temperature=self.kT, alpha=1.0, beta=0.0
+                    batch, temperature=self.kT, alpha=1.0, beta=0.0, dqn=True
                 )["rl_q"]
                 total_q_list.append(rl_q.detach())
         Q = torch.concat(total_q_list, dim=-1)
@@ -54,8 +69,8 @@ class ContextBandit:
         self.policy_value_net.to(device)
         ave_loss = 0
         loss_fn = WeightedSumLoss(
-            keys=("barrier", "freq"),
-            weights=(1.0, self.kT**2),
+            keys=("q0", "q1"),
+            weights=(1.0, 1.0),
             loss_fns=("mse_loss", "mse_loss"),
         )
         # loss_fn = WeightedSumLoss(keys=("q0", "q1"),weights=(1.0, self.kT**2), loss_fns=("mse_loss", "mse_loss"))
@@ -87,19 +102,20 @@ class ContextBandit:
                 data.delta_e = torch.tensor([delta_e[i]])
                 data.freq = torch.tensor([freq[i]])
                 data.barrier = torch.tensor([-rewards[i]])
+                data.q0 = torch.tensor([rewards[i]])
+                data.q1 = torch.tensor([freq[i]])
+                data.rl_q = torch.tensor([rewards[i] + freq[i] * self.kT])
                 total_dataset_added_list.append(data)
 
             total_dataset = ReactionDataset(total_dataset_added_list)
-            # TODO: Should be remove for the static model
-            # means, stddevs = get_scaler(["barrier", "freq", "delta_e"], total_dataset)
-            # self.policy_value_net.reaction_model.means = means
-            # self.policy_value_net.reaction_model.stddevs = stddevs
 
             q_dataloader = DataLoader(total_dataset, batch_size=batch_size)
             for epoch in range(steps[1]):
                 for batch in q_dataloader:
                     batch = batch_to(batch, device)
-                    output = self.policy_value_net(batch)
+                    output = self.policy_value_net.get_q(
+                        batch, temperature=self.kT, alpha=1.0, beta=0.0, dqn=True
+                    )
                     q_loss = loss_fn(output, batch)
                     self.optimizer.zero_grad()
                     q_loss.backward(retain_graph=True)
