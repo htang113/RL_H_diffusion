@@ -9,10 +9,12 @@ from ase.optimize import MDMin,BFGS, FIRE
 from ase.calculators.eam import EAM;
 from contextlib import redirect_stdout
 from io import StringIO
+from pfp_api_client.pfp.estimator import Estimator
+from pfp_api_client.pfp.calculators.ase_calculator import ASECalculator
 
 class environment(object):
     
-    def __init__(self, config, logfile = 'log', max_iter = 50,cutoff = 4):
+    def __init__(self, config, logfile = 'log', max_iter = 100,cutoff = 4):
         
         self.config = config
         self.max_iter = max_iter
@@ -28,10 +30,10 @@ class environment(object):
         self.config.atoms.set_constraint(ase.constraints.FixAtoms(mask = [False]*self.n_atom))
         dyn = MDMin(self.config.atoms, logfile=self.logfile);
         with redirect_stdout(self.output):
-            dyn.run(fmax=accuracy,steps = self.max_iter);
+            converge = dyn.run(fmax=accuracy,steps = self.max_iter);
         self.pos = self.config.atoms.get_positions().tolist();
         
-        return self.pos;
+        return self.pos, converge;
     
     def step(self, action: list=[], accuracy = 0.05):
         
@@ -44,8 +46,8 @@ class environment(object):
         self.pos = (self.config.pos(f='cartesion') + self.act_displace).tolist();
         self.config.set_atoms(self.pos,convention = 'cartesion');
         
-        self.relax(accuracy = accuracy);
-        fail = int(norm(self.pos_last - self.config.pos(f='cartesion'))<0.2);
+        _, converge = self.relax(accuracy = accuracy);
+        fail = int(norm(self.pos_last - self.config.pos(f='cartesion'))<0.2) + (not converge);
         E_next = self.config.potential();
             
         return E_next, fail;
@@ -65,7 +67,7 @@ class environment(object):
         self.config.atoms.set_scaled_positions(pos_frac);
         return 0;
     
-    def saddle(self, moved_atom=-1, accuracy = 0.1, n_points=10, platform="matlantis"):
+    def saddle(self, moved_atom=-1, accuracy = 0.1, n_points=10, r_cut = 4):
         
         self.config.atoms.set_constraint(ase.constraints.FixAtoms(mask = [False]*self.n_atom));
         self.initial.set_constraint(ase.constraints.FixAtoms(mask = [False]*self.n_atom));
@@ -76,54 +78,56 @@ class environment(object):
         neb = NEB(images)
         neb.interpolate()
         
-        temp = configuration([1]*6,[(0,0,0)],'H');
         for image in range(n_points):
-            temp.set_potential(platform=platform);
-            images[image].calc = temp.calculator;
+            images[image].calc = ASECalculator(Estimator(model_version="v4.0.0"));
             images[image].set_constraint(ase.constraints.FixAtoms(mask=self.mask()));
         with redirect_stdout(self.output):  
-            optimizer = FIRE(neb, logfile=self.logfile)
+            optimizer = MDMin(neb, logfile=self.logfile)
         
         res = optimizer.run(fmax=accuracy,steps = self.max_iter);
         res = True;
         if(res):
             Elist = [image.get_potential_energy() for image in images];
             E = np.max(Elist);
-            delta = 0.05;
-            if(moved_atom != -1):
-                Hessian = np.zeros([3,3]);
-                f0 = self.initial.get_forces();
-                pos_init = self.initial.get_positions()
-                for j in range(3):
-                    pos1 = pos_init.copy();
-                    pos1[moved_atom][j] += delta;
-                    self.initial.set_positions(pos1);
-                    Hessian[j] = -(self.initial.get_forces()-f0)[moved_atom]/delta;
-                prod = np.linalg.det((Hessian+Hessian.T)/2);
-                log_niu_prod = np.log(prod)/2;
+            
+            def log_niu_prod(input_atoms, NN, saddle=False):
+                delta = 0.05;
 
-                Hessian = np.zeros([2,2]);
-                max_ind = np.argmax(Elist);
-                saddle = images[max_ind];
-                tangent = (images[max_ind-1].get_positions() - images[max_ind].get_positions())[moved_atom];
-                v1 = np.cross([1,0,0],tangent);
-                v1 = v1/np.linalg.norm(v1);
-                v2 = np.cross(tangent,v1);
-                v2 = v2/np.linalg.norm(v2);
-                v = [v1,v2];
-                f0 = saddle.get_forces();
-                pos_s = saddle.get_positions();
-                for j in range(2):
-                    pos1 = pos_s.copy();
-                    pos1[moved_atom] += delta*v[j];
-                    saddle.set_positions(pos1);
-                    df = (saddle.get_forces()-f0)[moved_atom];
-                    Hessian[j] = -np.array([np.dot(df, v[0]),np.dot(df, v[1])])/delta;
-                prod_s = np.linalg.det((Hessian+Hessian.T)/2);
-                log_niu_prod_s = np.log(prod_s)/2;
-                log_attempt_freq = log_niu_prod-log_niu_prod_s+np.log(1.55716*10);
-            else:
-                log_attempt_freq = 0;
+                mass = input_atoms.get_masses()[NN];
+                mass = np.array([mass[i//3] for i in range(3*len(NN))]);
+                mass_mat = np.sqrt(mass[:,None]*mass[None,:]);
+                Hessian = np.zeros([len(NN)*3,len(NN)*3]);
+                f0 = input_atoms.get_forces();
+                pos_init = input_atoms.get_positions();
+                for u in range(len(NN)):
+                    for j in range(3):
+                        pos1 = pos_init.copy();
+                        pos1[NN[u]][j] += delta;
+                        input_atoms.set_positions(pos1);
+                        Hessian[3*u+j] = -(input_atoms.get_forces()-f0)[NN].reshape(-1)/delta;
+                
+                freq_mat = (Hessian+Hessian.T)/2/mass_mat;
+                if(saddle):
+                    prod = np.prod(np.linalg.eigvals(freq_mat)[1:])
+                else:
+                    prod = np.linalg.det(freq_mat);
+                output = np.log(np.abs(prod))/2;
+                
+                return output;
+            
+            max_ind = np.argmax(Elist);
+            r_cut = 3;
+            NN = self.initial.get_distances(moved_atom, range(len(self.initial)), mic=True);
+            NN = np.argwhere(NN<r_cut).T[0];
+            self.initial.calc =  ASECalculator(Estimator(model_version="v4.0.0"));
+            self.initial.set_constraint(ase.constraints.FixAtoms(mask = [False]*self.n_atom));
+            images[max_ind].calc = ASECalculator(Estimator(model_version="v4.0.0"));
+            images[max_ind].set_constraint(ase.constraints.FixAtoms(mask = [False]*self.n_atom));
+            log_niu_min = log_niu_prod(self.initial,NN);
+            log_niu_s = log_niu_prod(images[max_ind],NN, saddle=True);
+            
+            log_attempt_freq = log_niu_min-log_niu_s+np.log(1.55716*10);
+
         else:
             E = 0;
             log_attempt_freq = 0;
