@@ -15,24 +15,28 @@ from rlmd.action_space import actions
 import os
 from ase import io
 
+task = "dev/sro"
+if task not in os.listdir():
+    os.makedirs(task, exist_ok=True)
 sro = "0.8"
 T = 400
 kT = T * 8.617 * 10**-5
 
-horizon = 500
+horizon = 1000
 model = ReactionDQN.load("model_trained_graph.pt")
 trainer = ContextBandit(model, temperature=T)
 
 Tl = []
 Cl = []
-for u in range(50, 100):
+randint = np.random.randint(100, size=30)
+for u in randint:
     conf = configuration()
     conf.load("POSCARs/" + sro + "/POSCAR_" + str(u))
     conf.set_potential(platform="mace")
-    env = environment(conf, max_iter=100)
+    env = environment(conf, max_iter=100, logfile=task + "/log")
     env.relax(accuracy=0.1)
 
-    filename = "POSCARs/" + sro + "/XDATCAR" + str(u)
+    filename = str(task) + "/XDATCAR" + str(u)
     io.write(filename, conf.atoms, format="vasp-xdatcar")
     tlist = [0]
     clist = [conf.atoms.get_positions()[-1].tolist()]
@@ -50,5 +54,5 @@ for u in range(50, 100):
             print(str(u) + ": " + str(tstep))
     Tl.append(tlist)
     Cl.append(clist)
-    with open("POSCARs/" + sro + "/diffuse.json", "w") as file:
+    with open(str(task) + "/diffuse.json", "w") as file:
         json.dump([Tl, Cl], file)
