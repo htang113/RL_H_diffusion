@@ -5,7 +5,7 @@ Created on Fri Sep 30 14:40:00 2022
 @author: 17000
 """
 
-from typing import List
+from typing import List, Dict
 
 import numpy as np
 import torch
@@ -15,7 +15,7 @@ from ase import Atoms
 from rgnn.graph.dataset.reaction import ReactionDataset
 from rgnn.graph.reaction import ReactionGraph
 from rgnn.graph.utils import batch_to
-from rgnn.models.reaction import ReactionDQN
+from rgnn.models.reaction import ReactionDQN2
 from torch_geometric.loader import DataLoader
 from rgnn.train.loss import WeightedSumLoss
 
@@ -23,37 +23,30 @@ from rgnn.train.loss import WeightedSumLoss
 class ContextBandit:
     def __init__(
         self,
-        model: ReactionDQN,
+        model: ReactionDQN2,
+        logger,
         lr=10**-3,
         eps_clip=0.01,
-        temperature=300,
-        train_all=False,
+        temperature=300
     ):
         self.policy_value_net = model
-        if not train_all:
-            for name, param in self.policy_value_net.named_parameters():
-                if "reaction_model" in name:
-                    param.requires_grad = False
-
-        trainable_params = filter(
-            lambda p: p.requires_grad, self.policy_value_net.parameters()
-        )
-        # self.reward_normalizer = DynamicNormalizer()
-        self.optimizer = optim.Adam(trainable_params, lr=lr)
+        self.logger = logger
         self.optimizer = optim.Adam(self.policy_value_net.parameters(), lr=lr)
         self.eps_clip = eps_clip
         self.kT = temperature * 8.617 * 10**-5
 
     def select_action(self, state, action_space, device="cuda"):
         self.policy_value_net.to(device)
-        dataset = convert(state, action_space)
+        self.policy_value_net.eval()
+        dataset_list = convert(state, action_space)
+        dataset = ReactionDataset(dataset_list)
         total_q_list = []
         dataloader = DataLoader(dataset, batch_size=16)
         with torch.no_grad():
             for batch in dataloader:
                 batch = batch_to(batch, device)
                 rl_q = self.policy_value_net.get_q(
-                    batch, temperature=self.kT, alpha=1.0, beta=0.0, dqn=True
+                    batch, kT=self.kT, alpha=1.0, beta=0.0, dqn=False
                 )["rl_q"]
                 total_q_list.append(rl_q.detach())
         Q = torch.concat(total_q_list, dim=-1)
@@ -65,8 +58,9 @@ class ContextBandit:
 
         return action, action_probs, Q
 
-    def update(self, memory_l, gamma, steps, batch_size=8, device="cuda"):
+    def update(self, memory_l, steps, batch_size=8, device="cuda"):
         self.policy_value_net.to(device)
+        self.policy_value_net.train()
         ave_loss = 0
         loss_fn = WeightedSumLoss(
             keys=("q0", "q1"),
@@ -92,8 +86,8 @@ class ContextBandit:
 
             total_dataset_list = []
             for i, state in enumerate(states):
-                dataset = convert(state, taken_actions[i])
-                total_dataset_list += dataset
+                dataset_list = convert(state, taken_actions[i])
+                total_dataset_list += dataset_list
 
             total_dataset_added_list = []
             for i, data in enumerate(total_dataset_list):
@@ -114,7 +108,7 @@ class ContextBandit:
                 for batch in q_dataloader:
                     batch = batch_to(batch, device)
                     output = self.policy_value_net.get_q(
-                        batch, temperature=self.kT, alpha=1.0, beta=0.0, dqn=True
+                        batch, kT=self.kT, alpha=1.0, beta=0.0, dqn=False
                     )
                     q_loss = loss_fn(output, batch)
                     self.optimizer.zero_grad()
@@ -124,29 +118,96 @@ class ContextBandit:
                     )
                     self.optimizer.step()
                 ave_loss += q_loss.detach().item()
-                print(f"* Epoch {epoch},Q loss: {q_loss.detach().item()}")
+                self.logger.info(f"* Epoch {epoch},Q loss: {q_loss.detach().item()}")
 
         return ave_loss / steps[0] / steps[1]
 
 
 class Q_trainer:
-    def __init__(self, model, target, lr=10**-3, temperature=300):
+    def __init__(
+        self,
+        model: ReactionDQN2,
+        logger,
+        q_params: Dict[str, Dict[str, float] | bool | float],
+        target_model: ReactionDQN2 | None = None,
+        lr=10**-3,
+        train_all=False,
+    ):
         self.policy_value_net = model
-        self.target_net = target
-        self.optimizer = optim.Adam(self.policy_value_net.parameters(), lr=lr)
-        self.kT = temperature * 8.617 * 10**-5
+        self.target_net = target_model
+        self.logger = logger
+        if not train_all:
+            for name, param in self.policy_value_net.named_parameters():
+                if "reaction_model" in name:
+                    param.requires_grad = False
 
-    def select_action(self, state, action_space):
-        self.policy_value_net.convert([state], [action_space])
-        Q = self.policy_value_net()[0]
-        action_probs = nn.Softmax(dim=0)(Q[:, 0] / self.kT)
+        trainable_params = filter(
+            lambda p: p.requires_grad, self.policy_value_net.parameters()
+        )
+        # self.reward_normalizer = DynamicNormalizer()
+        self.optimizer = optim.Adam(trainable_params, lr=lr)
+        self.kT = q_params["temperature"] * 8.617 * 10**-5
+        if q_params["alpha"] == 0.0:
+            self.q_kT = None
+        else:
+            self.q_kT = q_params["temperature"] * 8.617 * 10**-5
+        self.kb = 8.617 * 10**-5
+        self.alpha = q_params["alpha"]
+        self.beta = q_params["beta"]
+        self.dqn = q_params["dqn"]
+
+    def update_T(self, temperature):
+        self.kT = temperature * 8.617 * 10**-5
+        if self.alpha != 0.0:
+            self.q_kT = temperature * 8.617 * 10**-5
+
+    def select_action(self, state, action_space, device="cuda"):
+        self.policy_value_net.to(device)
+        self.policy_value_net.eval()
+        dataset_list = convert(state, action_space)
+        dataset = ReactionDataset(dataset_list)
+        total_q_list = []
+        dataloader = DataLoader(dataset, batch_size=16)
+        with torch.no_grad():
+            for batch in dataloader:
+                batch = batch_to(batch, device)
+                rl_q = self.policy_value_net.get_q(
+                    batch, kT=self.kT, alpha=1.0, beta=0.0, dqn=False
+                )["rl_q"]
+                total_q_list.append(rl_q.detach())
+        Q = torch.concat(total_q_list, dim=-1)
+        action_probs = nn.Softmax(dim=0)(Q)
         action = np.random.choice(
-            len(action_probs.detach().numpy()), p=action_probs.detach().numpy()
+            len(action_probs.detach().cpu().numpy()),
+            p=action_probs.detach().cpu().numpy(),
         )
 
         return action, action_probs, Q
 
-    def update(self, memory_l, gamma, steps, size=10):
+    def get_max_Q(self, model, state, action_space, device="cuda"):
+        dataset_list = convert(state, action_space)
+        dataset = ReactionDataset(dataset_list)
+        dataloader = DataLoader(dataset, batch_size=16, shuffle=False)
+        q_values_list = []
+        with torch.no_grad():
+            model.eval()
+            model.to(device)
+            for batch in dataloader:
+                batch = batch_to(batch, device)
+                q = model.get_q(
+                    batch,
+                    kT=self.q_kT,
+                    alpha=self.alpha,
+                    beta=self.beta,
+                    dqn=self.dqn,
+                )["rl_q"]
+                q_values_list.append(q.detach())
+        del dataset
+        next_q = torch.cat(q_values_list, dim=0)
+        max_q = torch.max(next_q)
+        return max_q
+
+    def update(self, memory_l, gamma, steps, size=10, batch_size=8, device="cuda"):
         self.target_net.load_state_dict(self.policy_value_net.state_dict())
         ave_loss = 0
         for m in range(steps[0]):
@@ -170,26 +231,52 @@ class Q_trainer:
                 ]
                 next_aspace += [aspace[i] for i in range(1, len(aspace))]
             rewards = torch.tensor(rewards, dtype=torch.float)
-            self.policy_value_net.convert(states, taken_actions)
             next_Q = torch.zeros(len(next_aspace))
-            for i in range(len(next_aspace)):
-                self.target_net.convert([next_states[i]], [next_aspace[i]])
-                next_Q[i] = torch.max(self.target_net())
 
+            for i, state in enumerate(next_states):
+                max_q = self.get_max_Q(
+                    self.target_net, state, next_aspace[i], device=device
+                )
+                next_Q[i] = max_q
+            dataset_list = []
+            for i, state in enumerate(states):
+                dataset_list += convert(state, taken_actions[i])
+            dataset = ReactionDataset(dataset_list)
+            dataset_added_list = []
+            for i, data in enumerate(dataset):
+                data.rl_q = next_Q[i] * gamma + rewards[i]
+                # data.q0 = memory_q0[i]
+                dataset_added_list.append(data)
+            dataset_added = ReactionDataset(dataset_added_list)
+            q_dataloader = DataLoader(
+                dataset_added, batch_size=batch_size, shuffle=False
+            )
+            self.policy_value_net.train()
             for epoch in range(steps[1]):
-                Q = self.policy_value_net()
-                target = next_Q * gamma + rewards
-                loss = torch.mean((target - Q[:, 0, 0]) ** 2)
-
-                self.optimizer.zero_grad()
-                loss.backward(retain_graph=True)
-                self.optimizer.step()
-                ave_loss += loss
+                for batch in q_dataloader:
+                    batch = batch_to(batch, device)
+                    q_pred = self.policy_value_net.get_q(
+                        batch,
+                        kT=self.q_kT,
+                        alpha=self.alpha,
+                        beta=self.beta,
+                        dqn=self.dqn,
+                    )["rl_q"]
+                    loss = torch.mean((batch["rl_q"] - q_pred) ** 2)
+                    self.optimizer.zero_grad()
+                    loss.backward(retain_graph=True)
+                    torch.nn.utils.clip_grad_norm_(
+                        self.policy_value_net.parameters(), max_norm=1.0
+                    )
+                    self.optimizer.step()
+                ave_loss += loss.detach().item()
+            if device == "cuda":
+                torch.cuda.empty_cache()
 
         return ave_loss / steps[0] / steps[1]
 
 
-def convert(atoms: Atoms, actions: List[List[float]]) -> ReactionDataset:
+def convert(atoms: Atoms, actions: List[List[float]]) -> List[ReactionGraph]:
     traj_reactant = []
     traj_product = []
     for act in actions:
@@ -208,6 +295,6 @@ def convert(atoms: Atoms, actions: List[List[float]]) -> ReactionDataset:
     for i in range(len(traj_reactant)):
         data = ReactionGraph.from_ase(traj_reactant[i], traj_product[i])
         dataset_list.append(data)
-    dataset = ReactionDataset(dataset_list)
+    # dataset = ReactionDataset(dataset_list)
 
-    return dataset
+    return dataset_list
