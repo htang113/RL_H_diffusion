@@ -3,38 +3,40 @@ import os
 
 import numpy as np
 from ase import io
-from rgnn.models.reaction import ReactionDQN2
+from rgnn.common.registry import registry
 
 from rlmd.action_space_v3 import actions as actions_v3
 from rlmd.configuration import configuration
 from rlmd.logger import setup_logger
 from rlmd.step import environment
-from rlmd.train_graph import Q_trainer
+from rlmd.train_graph_v2 import select_action
 
 
-task = "dev/test_DQN"
+task = "dev/DQN_800"
 if task not in os.listdir():
     os.makedirs(task, exist_ok=True)
 model_path = "dev/Vrandom_DQN"
 log_filename = f"{task}/logger.log"  # Define your log filename
 logger = setup_logger("Deploy", log_filename)
-n_episodes = 50
-T = 400
-horizon = 5
+n_episodes = 10
+T_start = 1200
+T_end = 800
+horizon = 200
 # kT = T * 8.617 * 10**-5
 
-model = ReactionDQN2.load(f"{model_path}/model/model_trained")
-target_model = ReactionDQN2.load(f"{model_path}/model/model_trained")
+model = registry.get_model_class("dqn").load_old(f"{model_path}/model/model_trained")
+target_model = registry.get_model_class("dqn").load_old(
+    f"{model_path}/model/model_trained"
+)
 q_params = {
-    "temperature": 900,
-    "alpha": 0.4,
-    "beta": 0.3,
+    "alpha": 0.0,
+    "beta": 1.0,
     "dqn": True,
 }
-trainer = Q_trainer(model=model, logger=logger, q_params=q_params)
+# trainer = Q_trainer(model=model, logger=logger, q_params=q_params)
 
 new_pool = []
-pool = ["data/POSCARs/POSCAR_" + str(i) for i in range(1, 450)]
+pool = ["data/POSCARs_500/POSCAR_" + str(i) for i in range(1, 450)]
 for filename in pool:
     atoms = io.read(filename)
     if len(atoms) < 500:
@@ -53,18 +55,21 @@ for u in range(n_episodes):
     filename = str(task) + "/XDATCAR" + str(u)
     io.write(filename, conf.atoms, format="vasp-xdatcar")
     Elist = [conf.atoms.get_positions()[-1].tolist()]
+    logger.info(f"Episode: {u}")
     for tstep in range(horizon):
-        T = 1000 - 950 * tstep / (horizon - 1)
-        trainer.update_T(T)
+        T = T_start - (T_start - T_end) * tstep / horizon
+        q_params.update({"temperature": T})
         action_space = actions_v3(conf)
-        act_id, act_probs, Q = trainer.select_action(conf.atoms, action_space)
+        act_id, act_probs, Q = select_action(model, conf.atoms, action_space, q_params)
         action = action_space[act_id]
         E_next, fail = env.step(action, accuracy=0.1)
         io.write(filename, conf.atoms, format="vasp-xdatcar", append=True)
-        Elist.append(conf.atoms.get_positions()[-1].tolist())
-        if tstep % 100 == 0:
-            logger.info(str(u) + ": " + str(tstep))
-    El.append(Elist)
+        energy = conf.potential()
+        Elist.append(energy)
+        if tstep % 10 == 0:
+            logger.info(
+                f"Step: {tstep}, T: {q_params['temperature']:.3f}, E: {energy:.3f}"
+            )
 
     with open(str(task) + "/converge.json", "w") as file:
         json.dump(El, file)

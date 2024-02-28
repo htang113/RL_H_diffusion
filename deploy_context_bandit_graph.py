@@ -4,32 +4,40 @@ import os
 import numpy as np
 import torch
 from ase import io
-from rgnn.models.reaction import ReactionDQN2
+from rgnn.common.registry import registry
 
 from rlmd.action_space_v3 import actions as actions_v3
 from rlmd.configuration import configuration
 from rlmd.logger import setup_logger
 from rlmd.step import environment
-from rlmd.train_graph import ContextBandit
+from rlmd.train_graph_v2 import select_action
 
-task = "dev/test_CB"
+task = "dev/CB_800_2500"
 if task not in os.listdir():
     os.makedirs(task, exist_ok=True)
 model_path = "dev/Vrandom_CB"
 log_filename = f"{task}/logger.log"  # Define your log filename
 logger = setup_logger("Deploy", log_filename)
 # sro = "0.8"
-n_episodes = 30
-T = 400
+n_episodes = 10
+horizon = 2500
+T = 800
 # kT = T * 8.617 * 10**-5
 
-horizon = 5
-model = ReactionDQN2.load(f"{model_path}/model/model_trained")
-trainer = ContextBandit(model, logger=logger, temperature=T)
+gcnn = registry.get_reaction_model_class("painn").load(
+    "/home/hjchun/downloads_git_repo/ReactionGraphNeuralNetwork/dev/best_model_mace_Vrandom_attention.pth.tar"
+)
+model = registry.get_model_class("dqn")(gcnn, N_emb=16, N_feat=32, canonical=True)
 
+q_params = {
+    "temperature": T,
+    "alpha": 1.0,
+    "beta": 0.0,
+    "dqn": False,
+}
 Tl = []
 Cl = []
-pool = ["data/POSCARs/POSCAR_" + str(i) for i in range(1, 450)]
+pool = ["data/POSCARs_500/POSCAR_" + str(i) for i in range(1, 450)]
 new_pool = []
 for filename in pool:
     atoms = io.read(filename)
@@ -49,9 +57,10 @@ for u in range(n_episodes):
     io.write(filename, conf.atoms, format="vasp-xdatcar")
     tlist = [0]
     clist = [conf.atoms.get_positions()[-1].tolist()]
+    logger.info(f"Episode: {u}")
     for tstep in range(horizon):
         action_space = actions_v3(conf)
-        act_id, act_probs, Q = trainer.select_action(conf.atoms, action_space)
+        act_id, act_probs, Q = select_action(model, conf.atoms, action_space, q_params)
         Gamma = float(torch.sum(torch.exp(Q)))
         dt = 1 / Gamma * 10**-6
         tlist.append(tlist[-1] + dt)
@@ -60,7 +69,9 @@ for u in range(n_episodes):
         io.write(filename, conf.atoms, format="vasp-xdatcar", append=True)
         clist.append(conf.atoms.get_positions()[-1].tolist())
         if tstep % 100 == 0:
-            print(str(u) + ": " + str(tstep))
+            logger.info(
+                f"Step: {tstep}, T: {q_params['temperature']:.2f}, E: {conf.potential():.3f}"
+            )
     Tl.append(tlist)
     Cl.append(clist)
     with open(str(task) + "/diffuse.json", "w") as file:

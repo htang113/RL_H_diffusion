@@ -6,7 +6,7 @@ from rlmd.action_space import actions
 from rlmd.action_space_v3 import actions as actions_v3
 from rlmd.logger import setup_logger
 from rgnn.models.reaction_models import PaiNN
-from rgnn.models.reaction import ReactionDQN
+from rgnn.models.dqn import ReactionDQN
 import numpy as np
 from ase import io
 
@@ -16,17 +16,17 @@ import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
-task = "data/V_Diff/traj4"
+task = "data/Vrandom_mace_256/traj0"
 horizon = 20
 n_traj = 100
 
 species = ["Cr", "Co", "Ni"]
 
-gcnn = PaiNN(species=species)
-reaction_model = ReactionDQN(gcnn)
-trainer = ContextBandit(reaction_model, temperature=1000, lr=5e-5)
+# gcnn = PaiNN(species=species)
+# reaction_model = ReactionDQN(gcnn)
+# trainer = ContextBandit(reaction_model, temperature=1000, lr=5e-5)
 
-pool = ["data/POSCARs/POSCAR_" + str(i) for i in range(1, 450)]
+pool = ["data/POSCARs_256/POSCAR_" + str(i) for i in range(0, 100)]
 
 traj_list = []
 if task not in os.listdir():
@@ -38,12 +38,12 @@ if os.path.exists(opt_log_filenmae):
     os.remove(opt_log_filenmae)
 
 logger = setup_logger("RL", log_filename)
-new_pool = []
-for filename in pool:
-    atoms = io.read(filename)
-    if len(atoms) < 500:
-        new_pool.append(filename)
-logger.info(f"Original pool num: {len(pool)}, Filtered pool num: {len(new_pool)}")
+# new_pool = []
+# for filename in pool:
+#     atoms = io.read(filename)
+#     if len(atoms) < 500:
+#         new_pool.append(filename)
+# logger.info(f"Original pool num: {len(pool)}, Filtered pool num: {len(new_pool)}")
 
 
 if "traj" not in os.listdir(task):
@@ -53,7 +53,7 @@ if "model" not in os.listdir(task):
 
 for epoch in range(n_traj):
     conf = configuration()
-    file = new_pool[np.random.randint(len(new_pool))]
+    file = pool[np.random.randint(len(pool))]
     conf.load(file)
     logger.info("epoch = " + str(epoch) + ":  " + file)
     conf.set_potential(platform="mace")

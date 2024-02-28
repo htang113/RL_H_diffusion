@@ -20,109 +20,6 @@ from torch_geometric.loader import DataLoader
 from rgnn.train.loss import WeightedSumLoss
 
 
-class ContextBandit:
-    def __init__(
-        self,
-        model: ReactionDQN,
-        logger,
-        lr=10**-3,
-        eps_clip=0.01,
-        temperature=300,
-    ):
-        self.policy_value_net = model
-        self.logger = logger
-        self.optimizer = optim.Adam(self.policy_value_net.parameters(), lr=lr)
-        self.eps_clip = eps_clip
-        self.kT = temperature * 8.617 * 10**-5
-
-    def select_action(self, state, action_space, device="cuda"):
-        self.policy_value_net.to(device)
-        self.policy_value_net.eval()
-        dataset_list = convert(state, action_space)
-        dataset = ReactionDataset(dataset_list)
-        total_q_list = []
-        dataloader = DataLoader(dataset, batch_size=16)
-        with torch.no_grad():
-            for batch in dataloader:
-                batch = batch_to(batch, device)
-                rl_q = self.policy_value_net.get_q(
-                    batch, kT=self.kT, alpha=1.0, beta=0.0, dqn=False
-                )["rl_q"]
-                total_q_list.append(rl_q.detach())
-        Q = torch.concat(total_q_list, dim=-1)
-        action_probs = nn.Softmax(dim=0)(Q)
-        action = np.random.choice(
-            len(action_probs.detach().cpu().numpy()),
-            p=action_probs.detach().cpu().numpy(),
-        )
-
-        return action, action_probs, Q
-
-    def update(self, memory_l, steps, batch_size=8, device="cuda"):
-        self.policy_value_net.to(device)
-        self.policy_value_net.train()
-        ave_loss = 0
-        loss_fn = WeightedSumLoss(
-            keys=("q0", "q1"),
-            weights=(1.0, 1.0),
-            loss_fns=("mse_loss", "mse_loss"),
-        )
-        # loss_fn = WeightedSumLoss(keys=("q0", "q1"),weights=(1.0, self.kT**2), loss_fns=("mse_loss", "mse_loss"))
-
-        for m in range(steps[0]):
-            prob = [0.99 ** (len(memory_l) - i) for i in range(len(memory_l))]
-            randint = np.random.choice(range(len(memory_l)), p=prob / np.sum(prob))
-            memory = memory_l[randint]
-            states = memory.states
-            aspace = memory.act_space
-            actions = memory.actions
-            taken_actions = [[aspace[i][actions[i]]] for i in range(len(aspace))]
-            rewards = torch.tensor(memory.rewards, dtype=torch.float)
-            freq = torch.tensor(memory.freq, dtype=torch.float)
-            delta_e = torch.tensor(
-                [val - memory.E_min[i] for i, val in enumerate(memory.E_next)],
-                dtype=torch.float,
-            )
-
-            total_dataset_list = []
-            for i, state in enumerate(states):
-                dataset_list = convert(state, taken_actions[i])
-                total_dataset_list += dataset_list
-
-            total_dataset_added_list = []
-            for i, data in enumerate(total_dataset_list):
-                data.q1 = torch.tensor([freq[i]])
-                data.q0 = torch.tensor([rewards[i]])
-                data.delta_e = torch.tensor([delta_e[i]])
-                data.freq = torch.tensor([freq[i]])
-                data.barrier = torch.tensor([-rewards[i]])
-                data.q0 = torch.tensor([rewards[i]])
-                data.q1 = torch.tensor([freq[i]])
-                data.rl_q = torch.tensor([rewards[i] + freq[i] * self.kT])
-                total_dataset_added_list.append(data)
-
-            total_dataset = ReactionDataset(total_dataset_added_list)
-
-            q_dataloader = DataLoader(total_dataset, batch_size=batch_size)
-            for epoch in range(steps[1]):
-                for batch in q_dataloader:
-                    batch = batch_to(batch, device)
-                    output = self.policy_value_net.get_q(
-                        batch, kT=self.kT, alpha=1.0, beta=0.0, dqn=False
-                    )
-                    q_loss = loss_fn(output, batch)
-                    self.optimizer.zero_grad()
-                    q_loss.backward(retain_graph=True)
-                    torch.nn.utils.clip_grad_norm_(
-                        self.policy_value_net.parameters(), 1.0
-                    )
-                    self.optimizer.step()
-                ave_loss += q_loss.detach().item()
-                self.logger.info(f"* Epoch {epoch},Q loss: {q_loss.detach().item()}")
-
-        return ave_loss / steps[0] / steps[1]
-
-
 class Q_trainer:
     def __init__(
         self,
@@ -146,15 +43,8 @@ class Q_trainer:
         )
         # self.reward_normalizer = DynamicNormalizer()
         self.optimizer = optim.Adam(trainable_params, lr=lr)
+        self.q_params = q_params
         self.kT = q_params["temperature"] * 8.617 * 10**-5
-        if q_params["alpha"] == 0.0:
-            self.q_kT = None
-        else:
-            self.q_kT = q_params["temperature"] * 8.617 * 10**-5
-        self.kb = 8.617 * 10**-5
-        self.alpha = q_params["alpha"]
-        self.beta = q_params["beta"]
-        self.dqn = q_params["dqn"]
 
     def update_T(self, temperature):
         self.kT = temperature * 8.617 * 10**-5
@@ -171,9 +61,7 @@ class Q_trainer:
         with torch.no_grad():
             for batch in dataloader:
                 batch = batch_to(batch, device)
-                rl_q = self.policy_value_net.get_q(
-                    batch, kT=self.kT, alpha=1.0, beta=0.0, dqn=False
-                )["rl_q"]
+                rl_q = self.policy_value_net(batch, q_params=self.q_params)["rl_q"]
                 total_q_list.append(rl_q.detach())
         Q = torch.concat(total_q_list, dim=-1)
         action_probs = nn.Softmax(dim=0)(Q)
@@ -194,13 +82,7 @@ class Q_trainer:
             model.to(device)
             for batch in dataloader:
                 batch = batch_to(batch, device)
-                q = model.get_q(
-                    batch,
-                    kT=self.q_kT,
-                    alpha=self.alpha,
-                    beta=self.beta,
-                    dqn=self.dqn,
-                )["rl_q"]
+                q = model(batch, q_params=self.q_params)["rl_q"]
                 q_values_list.append(q.detach())
         del dataset
         next_q = torch.cat(q_values_list, dim=0)
@@ -255,18 +137,17 @@ class Q_trainer:
             for epoch in range(steps[1]):
                 for batch in q_dataloader:
                     batch = batch_to(batch, device)
-                    q_pred = self.policy_value_net.get_q(
-                        batch,
-                        kT=self.q_kT,
-                        alpha=self.alpha,
-                        beta=self.beta,
-                        dqn=self.dqn,
-                    )["rl_q"]
+                    q_pred = self.policy_value_net(batch, q_params=self.q_params)[
+                        "rl_q"
+                    ]
+                    self.logger.info(
+                        batch["rl_q"].detach(), q_pred.detach()
+                    )  # TODO: Debug
                     loss = torch.mean((batch["rl_q"] - q_pred) ** 2)
                     self.optimizer.zero_grad()
                     loss.backward(retain_graph=True)
                     torch.nn.utils.clip_grad_norm_(
-                        self.policy_value_net.parameters(), max_norm=1.0
+                        self.policy_value_net.parameters(), max_norm=0.8
                     )
                     self.optimizer.step()
                 ave_loss += loss.detach().item()
@@ -298,3 +179,25 @@ def convert(atoms: Atoms, actions: List[List[float]]) -> List[ReactionGraph]:
     # dataset = ReactionDataset(dataset_list)
 
     return dataset_list
+
+
+def select_action(model, state, action_space, q_params, device="cuda"):
+    model.to(device)
+    model.eval()
+    dataset_list = convert(state, action_space)
+    dataset = ReactionDataset(dataset_list)
+    total_q_list = []
+    dataloader = DataLoader(dataset, batch_size=16)
+    with torch.no_grad():
+        for batch in dataloader:
+            batch = batch_to(batch, device)
+            rl_q = model(batch, q_params=q_params)["rl_q"]
+            total_q_list.append(rl_q.detach())
+    Q = torch.concat(total_q_list, dim=-1)
+    action_probs = nn.Softmax(dim=0)(Q)
+    action = np.random.choice(
+        len(action_probs.detach().cpu().numpy()),
+        p=action_probs.detach().cpu().numpy(),
+    )
+
+    return action, action_probs, Q

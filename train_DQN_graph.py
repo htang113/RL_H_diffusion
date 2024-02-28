@@ -2,12 +2,12 @@ from rlmd.configuration import configuration
 from rlmd.trajectory import trajectory
 from rlmd.step import environment
 from rlmd.train_graph import Q_trainer
+from rlmd.train_graph_v2 import Q_trainer as Q_trainer_v2
 from rlmd.action_space import actions
 from rlmd.action_space_v2 import actions as actions_v2
 from rlmd.action_space_v3 import actions as actions_v3
 from rlmd.logger import setup_logger
-from rgnn.models.reaction_models import PaiNN
-from rgnn.models.reaction import ReactionDQN, ReactionDQN2
+from rgnn.common.registry import registry
 import numpy as np
 from ase import io
 import os
@@ -22,11 +22,15 @@ n_traj = 101
 
 species = ["Cr", "Co", "Ni"]
 
-gcnn = PaiNN.load("best_model_mace.pth.tar")
-model = ReactionDQN2(gcnn, N_feat=32)
-target_model = ReactionDQN2(gcnn, N_feat=32)
+gcnn = registry.get_reaction_model_class("painn").load(
+    "/home/hjchun/downloads_git_repo/ReactionGraphNeuralNetwork/dev/best_model_mace_Vrandom_attention.pth.tar"
+)
+# model = ReactionDQN22(gcnn, N_feat=32)
+# target_model = ReactionDQN22(gcnn, N_feat=32)
+model = registry.get_model_class("dqn2")(gcnn, N_emb=16, N_feat=32, canonical=True)
+target_model = registry.get_model_class("dqn2")(gcnn, N_emb=16, N_feat=32, canonical=True)
 
-pool = ["data/POSCARs/POSCAR_" + str(i) for i in range(1, 450)]
+pool = ["data/POSCARs_500/POSCAR_" + str(i) for i in range(1, 450)]
 
 traj_list = []
 if task not in os.listdir():
@@ -40,11 +44,11 @@ if os.path.exists(opt_log_filenmae):
 logger = setup_logger("RL", log_filename)
 q_params = {
     "temperature": 900,
-    "alpha": 0.4,
-    "beta": 0.3,
+    "alpha": 0.0,
+    "beta": 1.0,
     "dqn": True,
 }
-trainer = Q_trainer(
+trainer = Q_trainer_v2(
     model,
     target_model=target_model,
     logger=logger,
@@ -76,7 +80,9 @@ for epoch in range(n_traj):
     conf.set_potential(platform="mace")
     env = environment(conf, logfile=task + "/log", max_iter=100)
     env.relax(accuracy=0.1)
-    traj_list.append(trajectory(q_params["alpha"], q_params["beta"]))
+    traj_list.append(
+        trajectory(q_params["alpha"], q_params["beta"], T=q_params["temperature"])
+    )
     for tstep in range(horizon):
         action_space = actions_v3(conf)
         act_id, act_probs, Q = trainer.select_action(conf.atoms, action_space)
@@ -96,10 +102,13 @@ for epoch in range(n_traj):
                 action[0], n_points=8, accuracy=0.07, platform="mace"
             )
             info["E_s"], info["log_freq"] = E_s, freq
+        elif fail and q_params["alpha"] == 0.0:
+            info["E_s"] = 0
+            info["log_freq"] = 0
+            logger.info("fail step 0")
         else:
             info["E_s"] = 0
             info["log_freq"] = 0
-            logger.info("fail step 1")
 
         info["next"], info["fail"], info["E_next"] = conf.atoms.copy(), fail, E_next
         traj_list[-1].add(info)
