@@ -194,7 +194,7 @@ def select_action(model, state, action_space, q_params, device="cuda"):
             rl_q = model(batch, q_params=q_params)["rl_q"]
             total_q_list.append(rl_q.detach())
     Q = torch.concat(total_q_list, dim=-1)
-    action_probs = nn.Softmax(dim=0)(Q)
+    action_probs = nn.Softmax(dim=0)(Q/(q_params['temperature']*8.617*10**-5))
     action = np.random.choice(
         len(action_probs.detach().cpu().numpy()),
         p=action_probs.detach().cpu().numpy(),
