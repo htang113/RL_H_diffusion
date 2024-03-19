@@ -22,7 +22,7 @@ logger = setup_logger("Deploy", log_filename)
 n_episodes = 10
 horizon = 2500
 T = 800
-# kT = T * 8.617 * 10**-5
+kT = T * 8.617 * 10**-5
 
 gcnn = registry.get_reaction_model_class("painn").load(
     "/home/hjchun/downloads_git_repo/ReactionGraphNeuralNetwork/dev/best_model_mace_Vrandom_attention.pth.tar"
@@ -61,7 +61,7 @@ for u in range(n_episodes):
     for tstep in range(horizon):
         action_space = actions_v3(conf)
         act_id, act_probs, Q = select_action(model, conf.atoms, action_space, q_params)
-        Gamma = float(torch.sum(torch.exp(Q)))
+        Gamma = float(torch.sum(torch.exp(Q/kT)));
         dt = 1 / Gamma * 10**-6
         tlist.append(tlist[-1] + dt)
         action = action_space[act_id]
