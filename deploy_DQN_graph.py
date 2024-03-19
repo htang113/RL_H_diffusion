@@ -12,20 +12,20 @@ from rlmd.step import environment
 from rlmd.train_graph_v2 import select_action
 
 
-task = "dev/DQN_800"
+task = "dev/DQN_108_atoms_800K"
 if task not in os.listdir():
     os.makedirs(task, exist_ok=True)
-model_path = "dev/Vrandom_DQN"
+model_path = "dev/Vrandom_DQN_new"
 log_filename = f"{task}/logger.log"  # Define your log filename
 logger = setup_logger("Deploy", log_filename)
-n_episodes = 10
+n_episodes = 5
 T_start = 1200
 T_end = 800
-horizon = 200
+horizon = 2000
 # kT = T * 8.617 * 10**-5
 
-model = registry.get_model_class("dqn").load_old(f"{model_path}/model/model_trained")
-target_model = registry.get_model_class("dqn").load_old(
+model = registry.get_model_class("dqn_v2").load(f"{model_path}/model/model_trained")
+target_model = registry.get_model_class("dqn_v2").load(
     f"{model_path}/model/model_trained"
 )
 q_params = {
@@ -36,7 +36,7 @@ q_params = {
 # trainer = Q_trainer(model=model, logger=logger, q_params=q_params)
 
 new_pool = []
-pool = ["data/POSCARs_500/POSCAR_" + str(i) for i in range(1, 450)]
+pool = ["data/POSCARs_108/POSCAR_" + str(i) for i in range(0, 100)]
 for filename in pool:
     atoms = io.read(filename)
     if len(atoms) < 500:

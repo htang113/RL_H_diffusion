@@ -16,21 +16,23 @@ import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
-task = "dev/Vrandom_DQN"
+task = "dev/Vrandom_DQN_new_sum"
 horizon = 30
-n_traj = 101
+n_traj = 50
 
 species = ["Cr", "Co", "Ni"]
 
 gcnn = registry.get_reaction_model_class("painn").load(
-    "/home/hjchun/downloads_git_repo/ReactionGraphNeuralNetwork/dev/best_model_mace_Vrandom_attention.pth.tar"
+    "/home/hjchun/downloads_git_repo/ReactionGraphNeuralNetwork/dev/best_model_mace_Vrandom_new.pth.tar"
 )
 # model = ReactionDQN22(gcnn, N_feat=32)
 # target_model = ReactionDQN22(gcnn, N_feat=32)
-model = registry.get_model_class("dqn2")(gcnn, N_emb=16, N_feat=32, canonical=True)
-target_model = registry.get_model_class("dqn2")(gcnn, N_emb=16, N_feat=32, canonical=True)
+model = registry.get_model_class("dqn_v2")(gcnn, N_emb=16, N_feat=32, canonical=True)
+target_model = registry.get_model_class("dqn_v2")(
+    gcnn, N_emb=16, N_feat=32, canonical=True
+)
 
-pool = ["data/POSCARs_500/POSCAR_" + str(i) for i in range(1, 450)]
+pool = ["data/POSCARs_108/POSCAR_" + str(i) for i in range(0, 100)]
 
 traj_list = []
 if task not in os.listdir():
@@ -57,12 +59,12 @@ trainer = Q_trainer_v2(
     train_all=False,
 )
 
-new_pool = []
-for filename in pool:
-    atoms = io.read(filename)
-    if len(atoms) < 500:
-        new_pool.append(filename)
-logger.info(f"Original pool num: {len(pool)}, Filtered pool num: {len(new_pool)}")
+# new_pool = []
+# for filename in pool:
+#     atoms = io.read(filename)
+#     if len(atoms) < 500:
+#         new_pool.append(filename)
+# logger.info(f"Original pool num: {len(pool)}, Filtered pool num: {len(new_pool)}")
 
 if "traj" not in os.listdir(task):
     os.mkdir(task + "/traj")
@@ -74,7 +76,7 @@ with open(task + "/loss.txt", "w") as file:
 
 for epoch in range(n_traj):
     conf = configuration()
-    file = new_pool[np.random.randint(len(new_pool))]
+    file = pool[np.random.randint(len(pool))]
     conf.load(file)
     logger.info("epoch = " + str(epoch) + ":  " + file)
     conf.set_potential(platform="mace")
