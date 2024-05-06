@@ -33,7 +33,8 @@ target_model = registry.get_model_class("dqn_v2")(
 )
 
 pool = ["data/POSCARs_108/POSCAR_" + str(i) for i in range(0, 100)]
-
+pool += ["data/POSCARs_256/POSCAR_" + str(i) for i in range(0, 100)]
+pool += ["data/POSCARs_864/POSCAR_" + str(i) for i in range(0, 100)]
 traj_list = []
 if task not in os.listdir():
     os.makedirs(task, exist_ok=True)

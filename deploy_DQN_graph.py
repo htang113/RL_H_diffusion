@@ -12,16 +12,18 @@ from rlmd.step import environment
 from rlmd.train_graph_v2 import select_action
 
 
-task = "dev/DQN_108_atoms_800K"
+task = "dev/DQN_108_atoms_800K_new_1_T_scheduling"
 if task not in os.listdir():
     os.makedirs(task, exist_ok=True)
-model_path = "dev/Vrandom_DQN_new"
+model_path = "dev/Vrandom_DQN_new_sum"
 log_filename = f"{task}/logger.log"  # Define your log filename
 logger = setup_logger("Deploy", log_filename)
-n_episodes = 5
+n_episodes = 10
 T_start = 1200
 T_end = 800
 horizon = 2000
+horizon_0 = int(horizon / 2)
+horizon_1 = horizon - horizon_0
 # kT = T * 8.617 * 10**-5
 
 model = registry.get_model_class("dqn_v2").load(f"{model_path}/model/model_trained")
@@ -36,7 +38,7 @@ q_params = {
 # trainer = Q_trainer(model=model, logger=logger, q_params=q_params)
 
 new_pool = []
-pool = ["data/POSCARs_108/POSCAR_" + str(i) for i in range(0, 100)]
+pool = ["data/POSCARs_108_2more_defect/POSCAR_" + str(i) for i in range(0, 100)]
 for filename in pool:
     atoms = io.read(filename)
     if len(atoms) < 500:
@@ -57,7 +59,10 @@ for u in range(n_episodes):
     Elist = [conf.atoms.get_positions()[-1].tolist()]
     logger.info(f"Episode: {u}")
     for tstep in range(horizon):
-        T = T_start - (T_start - T_end) * tstep / horizon
+        if tstep <= horizon_0:
+            T = T_start - (T_start - T_end) * tstep / horizon_0
+        else:
+            T = T_end
         q_params.update({"temperature": T})
         action_space = actions_v3(conf)
         act_id, act_probs, Q = select_action(model, conf.atoms, action_space, q_params)
@@ -71,5 +76,5 @@ for u in range(n_episodes):
                 f"Step: {tstep}, T: {q_params['temperature']:.3f}, E: {energy:.3f}"
             )
 
-    with open(str(task) + "/converge.json", "w") as file:
-        json.dump(El, file)
+with open(str(task) + "/converge.json", "w") as file:
+    json.dump(El, file)
