@@ -6,168 +6,113 @@ Created on Sun Apr  7 16:08:57 2024
 @author: ubuntu
 """
 
-from abc import ABC
-from typing import Any, Dict, Literal, Tuple, List
-
+import numpy as np;
+from numpy.linalg import norm;
+import scipy;
 import torch
-from torch.nn import functional as F
-from torch_geometric.utils import scatter
-from torch_geometric.utils import degree
-from rgnn.common import keys as K
-from rgnn.common.registry import registry
-from rgnn.common.typing import DataDict, Tensor
-from rgnn.common.configuration import Configurable
-from rgnn.graph.utils import compute_neighbor_vecs
-from rgnn.models.nn.mlp import MLP
-from rgnn.models.nn.painn.representation import PaiNNRepresentation
-from rgnn.models.nn.scale import PerSpeciesScaleShift, canocialize_species
+from itertools import chain;
+from itertools import product;
+from scipy.sparse import linalg;
+from torch import nn;
+        
+class T_NN(torch.nn.Module):
+    
+    def __init__(self, device, elements=[1,29],r_cut = 3.5, N_emb=32, N_fit = 64, atom_max = 30):
+        super(T_NN, self).__init__()
+        
+        self.name = 'descriptorNN';
+        # set computation supercell box = [a, b, c, alpha, beta, gamma]. unit: A, degree
+        self.r_cut = r_cut;
+        self.N_emb = N_emb;
+        self.atom_max = atom_max;
+        self.elements = elements
+        # set neural network
 
-
-@registry.register_model("p_net_v2")
-class PNet2(torch.nn.Module, Configurable, ABC):
-    """PaiNN model, as described in https://arxiv.org/abs/2102.03150.
-    This model applies equivariant message passing layers within cartesian coordinates.
-    Provides "node_features" and "node_vec_features" embeddings.
-
-    Args:
-        species (list[str]): List of atomic species to consider.
-        cutoff (float): Cutoff radius for interactions. Defaults to 5.0.
-        hidden_channels (int): Number of hidden channels in the convolutional layers. Defaults to 128.
-        n_interactions (int): Number of message passing layers. Defaults to 3.
-        rbf_type (str): Type of radial basis functions. One of "gaussian" or "bessel".
-            Defaults to "bessel".
-        n_rbf (int): Number of radial basis functions. Defaults to 20.
-        trainable_rbf (bool): Whether to train the radial basis functions. Defaults to False.
-        activation (str): Activation function to use in the convolutional layers. Defaults to "silu".
-        shared_interactions (bool): Whether to share the convolutional layers across interactions.
-            Defaults to False.
-        shared_filters (bool): Whether to share the convolutional filters across interactions.
-            Defaults to False.
-        epsilon (float): Small value to add to the denominator for numerical stability. Defaults to 1e-8.
-    """
-
-    embedding_keys = [K.node_features]
-    # embedding_keys = [K.node_features, K.node_vec_features, K.reaction_features]
-
-    def __init__(
-        self,
-        species,
-        cutoff: float = 5.0,
-        hidden_channels: int = 128,
-        n_interactions: int = 3,
-        rbf_type: Literal["gaussian", "bessel"] = "bessel",
-        n_rbf: int = 20,
-        trainable_rbf: bool = False,
-        activation: str = "silu",
-        shared_interactions: bool = False,
-        shared_filters: bool = False,
-        epsilon: float = 1e-8,
-        # canonical: bool = False,
-        # N_emb: int = 16,
-        n_feat: int = 32,
-        dropout_rate: float = 0.15,
-    ):
-        super().__init__()
-        atomic_numbers = [val.item() for val in canocialize_species(species)]
-        atomic_numbers_dict = {}
-        for i, key in enumerate(atomic_numbers):
-            atomic_numbers_dict.update({key: species[i]})
-        atomic_numbers.sort()
-        self.atomic_numbers = atomic_numbers
-        sorted_species = []
-        for n in atomic_numbers:
-            sorted_species.append(atomic_numbers_dict[n])
-        self.species = sorted_species
-        self.cutoff = cutoff
-        self.species_energy_scale = PerSpeciesScaleShift(species)
-        self.embedding_keys = self.__class__.embedding_keys
-        # TODO: Should be more rigorous
-        self.hidden_channels = hidden_channels
-        self.n_interactions = n_interactions
-        self.rbf_type = rbf_type
-        self.n_rbf = n_rbf
-        self.trainable_rbf = trainable_rbf
-        self.activation = activation
-        self.shared_interactions = shared_interactions
-        self.shared_filters = shared_filters
-        self.epsilon = epsilon
-        # self.canonical = self.canonical
-        self.dropout_rate = dropout_rate
-        self.n_feat = n_feat
-
-        self.representation = PaiNNRepresentation(
-            hidden_channels=hidden_channels,
-            n_interactions=n_interactions,
-            rbf_type=rbf_type,
-            n_rbf=n_rbf,
-            trainable_rbf=trainable_rbf,
-            cutoff=cutoff,
-            activation=activation,
-            shared_interactions=shared_interactions,
-            shared_filters=shared_filters,
-            epsilon=epsilon,
+        self.mlp_emb = nn.Sequential(
+            nn.Linear(len(self.elements)**2, N_emb),
+            nn.Sigmoid(),
+            nn.Linear(N_emb, N_emb),
+            nn.Tanh(),
+            nn.Linear(N_emb, N_emb),
         )
-        self.probs_out = MLP(
-            n_input=hidden_channels + 1,
-            n_output=1,
-            hidden_layers=(self.n_feat, self.n_feat),
-            activation="silu",
-            w_init="xavier_uniform",
-            b_init="zeros",
+        
+        self.mlp_fit = nn.Sequential(
+            nn.Linear(N_emb*int(N_emb//4), N_fit),
+            nn.Tanh(),
+            nn.Linear(N_fit,N_fit),
+            nn.Sigmoid(),
+            nn.Linear(N_fit,N_fit),
+            nn.Tanh(),
+            nn.Linear(N_fit, 1)
         )
-        self.kb = 8.617 * 10**-5
-        self.reset_parameters()
+        self.device = device;
+        
+    def s(self, r):
+        if(r<1E-5):
+            return 0;
+        if(r<self.r_cut-0.2):
+            return 1/r;
+        elif(r<self.r_cut):
+            return 1/2/r*(np.cos(np.pi*(r-self.r_cut+0.2)/0.2)+1);
+        else:
+            return 0;
+        
+    def G(self, S_vec):
+        
+        s = S_vec.shape;
+        S_vec = S_vec.reshape([s[0]*s[1]*s[2],s[3]]);
+        Gmat = self.mlp_emb(S_vec);
 
-    def reset_parameters(self):
-        self.representation.reset_parameters()
-        self.probs_out.reset_parameters()
+        return Gmat.reshape([s[0],s[1],s[2], self.N_emb]);
+    
+    def convert(self, atoms_l):
+        
+        Nmax = np.max([len(atoms.get_atomic_numbers()) for atoms in atoms_l]);
+        self.R = torch.zeros([len(atoms_l), Nmax, self.atom_max, 4]).to(self.device);
+        self.Sg = torch.zeros([len(atoms_l), Nmax, self.atom_max, len(self.elements)**2]).to(self.device);
+        
+        for ind, atoms in enumerate(atoms_l):
+            atom_list = atoms.get_atomic_numbers();
+            natm = len(atom_list);
+            species   = list(set(atom_list));
+            
+            dist  = atoms.get_all_distances(mic=True)
+            dist = [np.argwhere((d!=0)*(d<self.r_cut)).T[0] for d in dist];
+            
+            R = [atoms.get_distances(dist[j], j, mic=True, vector=True) for j in range(natm)];
+            R = [[[1]+(1/norm(rij)*rij).tolist() for rij in R[i]]+[[0,0,0,0]]*(self.atom_max-len(R[i])) for i in range(len(R))];
 
-    def forward(self, data: DataDict):
-        compute_neighbor_vecs(data)
-        node_degrees = degree(data["edge_index"][0], num_nodes=torch.sum(data["n_atoms"]))
-        new_features_list = []
-        # new_features_list_2 = []
-        for graph_id in torch.unique(data["batch"]):
-            mask = data["batch"] == graph_id
-            filtered_nodes = node_degrees[mask]
+            Smat = torch.tensor([[self.s(norm(rij)) for rij in Ri]+[0]*(self.atom_max-len(Ri)) for Ri in R],dtype=torch.float32).to(self.device); 
+            
+            R_out = torch.einsum('ij,ijk->ijk',[Smat,torch.tensor(R, dtype=torch.float32).to(self.device)])
+            
+            mask_species  = [];
+            for d in range(len(dist)):
+                term1 = [];
+                for i in dist[d]:
+                    term1.append([(atom_list[d]==s1 and atom_list[i]==s2) for s1, s2 in product(species,species)]);
+                term2 = [[0]*len(species)**2]*(self.atom_max-len(dist[d]));
+                mask_species.append( term1 + term2 );
+            mask_species = torch.tensor(mask_species).to(self.device);
+            Sg_out = torch.einsum('ij,ijk->ijk', [Smat,mask_species]);
 
-            _, sorted_index = torch.sort(filtered_nodes, dim=-1, stable=True)
-            new_features_list.append(sorted_index)
-        connectivity_feat = torch.concat(new_features_list, dim=0)
-        data.update({K.elems: connectivity_feat})
-        data = self.representation(data)
+            self.R[ind, :natm,:,:] = R_out;
+            self.Sg[ind, :natm,:,:] = Sg_out;
+            
+    def forward(self, indl):
+        
+        Gmat = self.G(self.Sg[indl]);
+        Dmat = torch.einsum('uijk,uijl,uiml,uimn->uikn',[Gmat[:,:,:,:int(self.N_emb//4)], self.R[indl], self.R[indl], Gmat]);
 
-        time_components = self.probs_out(
-            torch.cat([data["kT"].unsqueeze(-1), data[K.node_features]], dim=-1)
-        ).squeeze(-1)
-
-        return torch.mean(time_components);
-
-    @torch.jit.unused
-    def save(self, filename: str):
-        state_dict = self.state_dict()
-        hyperparams = self.get_config()
-        state = {"state_dict": state_dict, "hyper_parameters": hyperparams}
-
-        torch.save(state, filename)
-
-    # "best_metric": best_metric,
-    @torch.jit.unused
-    @classmethod
-    def load(cls, path: str):
-        """Load the model from checkpoint created by pytorch lightning.
-
-        Args:
-            path (str): Path to the checkpoint file.
-
-        Returns:
-            InterAtomicPotential: The loaded model.
-        """
-        map_location = None if torch.cuda.is_available() else "cpu"
-        ckpt = torch.load(path, map_location=map_location)
-        hparams = ckpt["hyper_parameters"]
-        hparams.pop("@name")
-        state_dict = ckpt["state_dict"]
-        model = cls.from_config(hparams)
-        model.load_state_dict(state_dict=state_dict)
-        return model
+        s = Dmat.shape;
+        D = Dmat.reshape([s[0],s[1],s[2]*s[3]]);
+        Q = self.mlp_fit(D);
+        Q = torch.mean(Q, axis=(1,2));
+        
+        return Q  #(torch.tanh(Q)+1)/2;
+    
+    def save(self, filename):
+        torch.save(self.state_dict(), filename);
+        
+    def load(self, filename):
+        self.load_state_dict(torch.load(filename))
